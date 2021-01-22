@@ -1,10 +1,5 @@
-#include <ESPAsyncTCP.h>
-#include <tcp_axtls.h>
-#include <async_config.h>
-#include <AsyncPrinter.h>
-#include <ESPAsyncTCPbuffer.h>
-#include <SyncClient.h>
-#include <DebugPrintMacros.h>
+#define ESPALEXA_ASYNC
+#include <Espalexa.h>
 
 #include <ESPAsyncTCP.h>
 #include <tcp_axtls.h>
@@ -17,27 +12,35 @@
 #include "ESP8266WiFi.h"
 #include "ESPAsyncWebServer.h"
 
-// Set to true to define Relay as Normally Open (NO)
-#define RELAY_NO true
+#define IS_RELAY_NORMALLY_OPEN true
+#define NUMBER_OF_RELAYS 4
 
-// Set number of relays
-#define NUM_RELAYS 4
+Espalexa espalexa;
+AsyncWebServer server(80);
 
-// Assign each GPIO to a relay
-int relayGPIOs[NUM_RELAYS] = {16, 14, 12, 13};
+int relayGPIOs[NUMBER_OF_RELAYS] = {16, 14, 12, 13};
 
-// Replace with your network credentials
-const char *ssid = "your-ssid-here";
-const char *password = "your-password-here";
+void turnOnOffDevice(int gpioDevice, bool isTurnOn);
+void firstDeviceChanged(uint8_t brightness);
+void secondDeviceChanged(uint8_t brightness);
+void thirdDeviceChanged(uint8_t brightness);
+void fourthDeviceChanged(uint8_t brightness);
+String getLabelForNormallyOpenTurnedOn(int isTurnedOn);
+String getLabelForNormallyClosedTurnedOn(int isTurnedOn);
+void setRelayInitialState(int relayPin);
+void loadRelaysWithInitialState();
+void loadWiFiDevice();
+void loadServerRoutes(AsyncWebServer* server);
+void setDevices();
 
+const char *ssid = "12341234";
+const char *password = "12341234";
 const char *PARAM_INPUT_1 = "relay";
 const char *PARAM_INPUT_2 = "state";
 
-// Create AsyncWebServer object on port 80
-AsyncWebServer server(80);
-
 const char index_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE HTML><html>
+<!DOCTYPE HTML>
+<html>
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
@@ -56,26 +59,49 @@ const char index_html[] PROGMEM = R"rawliteral(
 <body>
   <h2>ESP Web Server</h2>
   %BUTTONPLACEHOLDER%
-<script>function toggleCheckbox(element) {
-  var xhr = new XMLHttpRequest();
-  if(element.checked){ xhr.open("GET", "/update?relay="+element.id+"&state=1", true); }
-  else { xhr.open("GET", "/update?relay="+element.id+"&state=0", true); }
-  xhr.send();
-}</script>
+<script>
+  function toggleCheckbox(element) {
+    var xhr = new XMLHttpRequest();
+    if(element.checked){ xhr.open("GET", "/update?relay="+element.id+"&state=1", true); }
+    else { xhr.open("GET", "/update?relay="+element.id+"&state=0", true); }
+    xhr.send();
+  }
+</script>
 </body>
 </html>
 )rawliteral";
 
-// Replaces placeholder with button section in your web page
-String processor(const String &var)
-{
-  //Serial.println(var);
-  if (var == "BUTTONPLACEHOLDER")
-  {
+void turnOnOffDevice(int gpioDevice, bool isTurnedOn) {
+  IS_RELAY_NORMALLY_OPEN 
+    ? digitalWrite(gpioDevice, !isTurnedOn)
+    : digitalWrite(gpioDevice, isTurnedOn);
+}
+
+void firstDeviceChanged(uint8_t brightness) {
+  bool isTurnedOn = brightness == 255;
+  turnOnOffDevice(relayGPIOs[0], isTurnedOn);
+}
+
+void secondDeviceChanged(uint8_t brightness) {
+  bool isTurnedOn = brightness == 255;
+  turnOnOffDevice(relayGPIOs[1], isTurnedOn);
+}
+
+void thirdDeviceChanged(uint8_t brightness) {
+  bool isTurnedOn = brightness == 255;
+  turnOnOffDevice(relayGPIOs[2], isTurnedOn);
+}
+
+void fourthDeviceChanged(uint8_t brightness) {
+  bool isTurnedOn = brightness == 255;
+  turnOnOffDevice(relayGPIOs[3], isTurnedOn);
+}
+
+String HTMLProcessor(const String &var) {
+  if (var == "BUTTONPLACEHOLDER") {
     String buttons = "";
-    for (int i = 1; i <= NUM_RELAYS; i++)
-    {
-      String relayStateValue = relayState(i);
+    for (int i = 1; i <= NUMBER_OF_RELAYS; i++) {
+      String relayStateValue = getRelayState(i);
       buttons += "<h4>Relay #" + String(i) + " - GPIO " + relayGPIOs[i - 1] + "</h4><label class=\"switch\"><input type=\"checkbox\" onchange=\"toggleCheckbox(this)\" id=\"" + String(i) + "\" " + relayStateValue + "><span class=\"slider\"></span></label>";
     }
     return buttons;
@@ -83,104 +109,89 @@ String processor(const String &var)
   return String();
 }
 
-String relayState(int numRelay)
-{
-  if (RELAY_NO)
-  {
-    if (digitalRead(relayGPIOs[numRelay - 1]))
-    {
-      return "";
-    }
-    else
-    {
-      return "checked";
-    }
-  }
-  else
-  {
-    if (digitalRead(relayGPIOs[numRelay - 1]))
-    {
-      return "checked";
-    }
-    else
-    {
-      return "";
-    }
-  }
-  return "";
+String getRelayState(int relayPin) {
+  int isTurnedOn = digitalRead(relayGPIOs[relayPin - 1]);
+  return IS_RELAY_NORMALLY_OPEN
+    ? getLabelForNormallyOpenTurnedOn(isTurnedOn)
+    : getLabelForNormallyClosedTurnedOn(isTurnedOn); 
 }
 
-void setup()
-{
-  // Serial port for debugging purposes
-  Serial.begin(115200);
+String getLabelForNormallyOpenTurnedOn(int isTurnedOn) {
+  return isTurnedOn ? "" : "checked";
+}
 
-  // Set all relays to off when the program starts - if set to Normally Open (NO), the relay is off when you set the relay to HIGH
-  for (int i = 1; i <= NUM_RELAYS; i++)
-  {
-    pinMode(relayGPIOs[i - 1], OUTPUT);
-    if (RELAY_NO)
-    {
-      digitalWrite(relayGPIOs[i - 1], HIGH);
-    }
-    else
-    {
-      digitalWrite(relayGPIOs[i - 1], LOW);
-    }
+String getLabelForNormallyClosedTurnedOn(int isTurnedOn) {
+  return isTurnedOn ? "checked" : "";
+}
+
+void setRelayInitialState(int relayPin) {
+  IS_RELAY_NORMALLY_OPEN
+    ? digitalWrite(relayPin, HIGH)
+    : digitalWrite(relayPin, LOW);
+}
+
+void loadRelaysWithInitialState() {
+  for (int i = 1; i <= NUMBER_OF_RELAYS; i++) {
+    pinMode(relayGPIOs[i-1], OUTPUT);
+    setRelayInitialState(relayGPIOs[i-1]);
   }
+}
 
-  // Connect to Wi-Fi
+void loadWiFiDevice() {
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED)
-  {
+  
+  while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
     Serial.println("Connecting to WiFi..");
   }
 
-  // Print ESP8266 Local IP Address
   Serial.println(WiFi.localIP());
-
-  // Route for root / web page
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send_P(200, "text/html", index_html, processor);
-  });
-
-  // Send a GET request to <ESP_IP>/update?relay=<inputMessage>&state=<inputMessage2>
-  server.on("/update", HTTP_GET, [](AsyncWebServerRequest *request) {
-    String inputMessage;
-    String inputParam;
-    String inputMessage2;
-    String inputParam2;
-    // GET input1 value on <ESP_IP>/update?relay=<inputMessage>
-    if (request->hasParam(PARAM_INPUT_1) & request->hasParam(PARAM_INPUT_2))
-    {
-      inputMessage = request->getParam(PARAM_INPUT_1)->value();
-      inputParam = PARAM_INPUT_1;
-      inputMessage2 = request->getParam(PARAM_INPUT_2)->value();
-      inputParam2 = PARAM_INPUT_2;
-      if (RELAY_NO)
-      {
-        Serial.print("NO ");
-        digitalWrite(relayGPIOs[inputMessage.toInt() - 1], !inputMessage2.toInt());
-      }
-      else
-      {
-        Serial.print("NC ");
-        digitalWrite(relayGPIOs[inputMessage.toInt() - 1], inputMessage2.toInt());
-      }
-    }
-    else
-    {
-      inputMessage = "No message sent";
-      inputParam = "none";
-    }
-    Serial.println(inputMessage + inputMessage2);
-    request->send(200, "text/plain", "OK");
-  });
-  // Start server
-  server.begin();
 }
 
-void loop()
-{
+void loadServerRoutes(AsyncWebServer* server) {
+  server->on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send_P(200, "text/html", index_html, HTMLProcessor);
+  });
+
+  server->on("/update", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->hasParam(PARAM_INPUT_1) & request->hasParam(PARAM_INPUT_2)) {
+      String inputMessage = request->getParam(PARAM_INPUT_1)->value();
+      String inputMessage2 = request->getParam(PARAM_INPUT_2)->value();
+      bool relayStateString = inputMessage2.toInt();
+      int relayPin = relayGPIOs[inputMessage.toInt()-1];
+
+      turnOnOffDevice(relayPin, relayStateString);
+    }
+
+    request->send(200, "text/plain", "OK");
+  });
+  
+  server->onNotFound([](AsyncWebServerRequest *request){
+    if (!espalexa.handleAlexaApiCall(request)) {
+      request->send(404, "text/plain", "Not found");
+    }
+  });
+}
+
+void setDevices() {
+  espalexa.addDevice("LUZ 1", firstDeviceChanged);
+  espalexa.addDevice("LUZ 2", secondDeviceChanged);
+  espalexa.addDevice("LUZ 3", thirdDeviceChanged);
+  espalexa.addDevice("LUZ 4", fourthDeviceChanged);
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  loadRelaysWithInitialState();
+  loadWiFiDevice();
+  loadServerRoutes(&server);
+  setDevices();
+  
+  espalexa.begin(&server);
+}
+
+void loop() {
+  espalexa.loop();
+  delay(1);
 }
